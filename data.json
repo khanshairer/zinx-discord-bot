@@ -1,0 +1,61 @@
+{
+  "guilds": {
+    "1517259509205172385": {
+      "channel_id": 1517259509205172388,
+      "reminders": [
+        {
+          "name": "Daily Reset",
+          "emoji": "\ud83d\udd04",
+          "hour": 0,
+          "minute": 0,
+          "lead_minutes": 0,
+          "title": "Daily Reset",
+          "body": "Daily Reset in {lead} minutes - make sure you have done your dailies and arena battles!",
+          "ping": true,
+          "enabled": true,
+          "id": "83e78fbd",
+          "last_fired": null
+        },
+        {
+          "name": "Bear Trap",
+          "emoji": "\ud83d\udc3b",
+          "hour": 19,
+          "minute": 0,
+          "lead_minutes": 0,
+          "title": "{time} Bear Trap",
+          "body": "The {time} Bear Trap opens in {lead} minutes. Get your buffs on and prepare your marches for the hunt!",
+          "ping": true,
+          "enabled": true,
+          "id": "2f65042c",
+          "last_fired": null
+        },
+        {
+          "name": "bear trap",
+          "emoji": ":D",
+          "hour": 6,
+          "minute": 32,
+          "lead_minutes": 0,
+          "title": "\ud83d\udd14 Bot Test Announcement",
+          "body": "zinxAssistant is working! This is a test reminder for everyone.",
+          "ping": true,
+          "enabled": true,
+          "id": "ee955303",
+          "last_fired": null
+        },
+        {
+          "name": "test alert",
+          "emoji": "\u2764\ufe0f",
+          "hour": 9,
+          "minute": 0,
+          "lead_minutes": 1,
+          "title": "Zinx assistant trial",
+          "body": "Yes, Your assitant is working!",
+          "ping": true,
+          "enabled": true,
+          "id": "fd21af24",
+          "last_fired": "2026-10-20T08:59:00+00:00"
+        }
+      ]
+    }
+  }
+}
