@@ -1,5 +1,6 @@
-"""Announcement commands and the scheduler loop for zinxAssistant.
 
+"""Announcement commands and the scheduler loop for zinxAssistant.
+author : sharier khan
 All times are UTC ("game time"). A background loop checks every 30
 seconds whether any reminder is due and posts its embed to the server's
 announcements channel.
