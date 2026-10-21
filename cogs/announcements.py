@@ -5,7 +5,7 @@ seconds whether any reminder is due and posts its embed to the server's
 announcements channel.
 """
 
-from datetime import datetime, timezone
+from datetime import datetime, timezone, timedelta
 
 import discord
 from discord import app_commands
@@ -54,14 +54,32 @@ class Announcements(commands.Cog):
             for r in g["reminders"]:
                 if not r.get("enabled", True):
                     continue
-                fire = due_fire_time(r, now)
-                if fire is None:
-                    continue
+                if r.get("date"):
+                    # A dated reminder fires once at its UTC date/time.
+                    event_time = datetime.strptime(
+                        r["date"], "%Y-%m-%d"
+                    ).replace(
+                        hour=r["hour"],
+                        minute=r["minute"],
+                        tzinfo=timezone.utc,
+                    )
+                    fire = event_time - timedelta(
+                        minutes=r.get("lead_minutes", 0)
+                    )
+                    # Allow one minute for the 30-second polling loop.
+                    if not (fire <= now < fire + timedelta(minutes=1)):
+                        continue
+                else:
+                    fire = due_fire_time(r, now)
+                    if fire is None:
+                        continue
                 try:
                     await self.post_reminder(channel, r)
                 except discord.HTTPException:
                     continue
                 self.storage.mark_fired(gid, r["id"], fire.isoformat())
+                if r.get("date"):
+                    self._update_reminder(gid, str(r["id"]), {"enabled": False})
 
     @scheduler.before_loop
     async def before_scheduler(self):
@@ -216,6 +234,63 @@ class Announcements(commands.Cog):
             f"(lead {lead_minutes} min, id `{r['id']}`)."
         )
 
+    @app_commands.command(name="setdate", description="Set a one-time UTC date for a reminder")
+    @app_commands.describe(
+        reminder_id="ID from /reminders",
+        date="Event date in YYYY-MM-DD format, e.g. 2026-10-25",
+    )
+    @app_commands.checks.has_permissions(manage_guild=True)
+    async def setdate(self, interaction: discord.Interaction, reminder_id: str, date: str):
+        try:
+            event_date = datetime.strptime(date, "%Y-%m-%d").date()
+        except ValueError:
+            await interaction.response.send_message(
+                "❌ Invalid date. Use YYYY-MM-DD.", ephemeral=True
+            )
+            return
+
+        reminder_id = reminder_id.strip()
+        guild = self.storage.get_guild(interaction.guild_id)
+        reminder = next(
+            (r for r in guild["reminders"] if str(r["id"]) == reminder_id),
+            None,
+        )
+        if reminder is None:
+            await interaction.response.send_message(
+                f"No reminder with id `{reminder_id}`.", ephemeral=True
+            )
+            return
+
+        event_time = datetime.combine(
+            event_date,
+            datetime.min.time(),
+            tzinfo=timezone.utc,
+        ).replace(hour=reminder["hour"], minute=reminder["minute"])
+        fire_time = event_time - timedelta(
+            minutes=reminder.get("lead_minutes", 0)
+        )
+        if fire_time <= datetime.now(timezone.utc):
+            await interaction.response.send_message(
+                "❌ That reminder's announcement time is already in the past (UTC).",
+                ephemeral=True,
+            )
+            return
+
+        self._update_reminder(
+            interaction.guild_id,
+            reminder_id,
+            {"date": event_date.isoformat(), "enabled": True},
+        )
+        await interaction.response.send_message(
+            f"📅 **Reminder date updated!**\n"
+            f"**Reminder:** {reminder['name']}\n"
+            f"**Event date:** {event_date.isoformat()}\n"
+            f"**Event time:** {reminder['hour']:02d}:{reminder['minute']:02d} UTC\n"
+            f"**Announcement time:** <t:{int(fire_time.timestamp())}:F>\n"
+            "This reminder will post once and then pause.",
+            ephemeral=True,
+        )
+
     @app_commands.command(name="reminders", description="List this server's scheduled announcements")
     async def reminders(self, interaction: discord.Interaction):
         g = self.storage.get_guild(interaction.guild_id)
@@ -367,6 +442,7 @@ class Announcements(commands.Cog):
     @setup.error
     @announce.error
     @addreminder.error
+    @setdate.error
     @removereminder.error
     @testreminder.error
     @editreminder.error
