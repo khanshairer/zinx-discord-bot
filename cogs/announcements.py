@@ -26,6 +26,25 @@ def parse_time(text):
     return hour, minute
 
 
+def repeated_fire_time(reminder, now):
+    """Return due UTC fire time for a repeating reminder, or None."""
+    anchor_day = datetime.strptime(reminder["repeat_start_date"], "%Y-%m-%d").date()
+    interval = reminder["repeat_days"]
+    # Check surrounding event days because lead time can cross midnight.
+    for offset in (-1, 0, 1):
+        day = now.date() + timedelta(days=offset)
+        if day < anchor_day or (day - anchor_day).days % interval:
+            continue
+        event_at = datetime.combine(day, datetime.min.time(), tzinfo=timezone.utc)
+        event_at = event_at.replace(hour=reminder["hour"], minute=reminder["minute"])
+        fire_at = event_at - timedelta(minutes=reminder.get("lead_minutes", 0))
+        if fire_at <= now < fire_at + timedelta(minutes=1):
+            # Keep a separate persisted stamp to avoid duplicate posts.
+            if reminder.get("last_fired") != fire_at.isoformat():
+                return fire_at
+    return None
+
+
 def build_embed(emoji, title, body):
     heading = f"{emoji} {title}".strip() if emoji else title
     return discord.Embed(title=heading, description=body, color=discord.Color.blurple())
@@ -55,7 +74,11 @@ class Announcements(commands.Cog):
             for r in g["reminders"]:
                 if not r.get("enabled", True):
                     continue
-                if r.get("date"):
+                if r.get("repeat_days"):
+                    fire = repeated_fire_time(r, now)
+                    if fire is None:
+                        continue
+                elif r.get("date"):
                     # A dated reminder fires once at its UTC date/time.
                     event_time = datetime.strptime(
                         r["date"], "%Y-%m-%d"
@@ -68,7 +91,7 @@ class Announcements(commands.Cog):
                         minutes=r.get("lead_minutes", 0)
                     )
                     # Allow one minute for the 30-second polling loop.
-                    if not (fire <= now < fire + timedelta(minutes=1)):
+                    if not (fire <= now < fire + timedelta(minutes=1)) or r.get("last_fired") == fire.isoformat():
                         continue
                 else:
                     fire = due_fire_time(r, now)
@@ -79,7 +102,7 @@ class Announcements(commands.Cog):
                 except discord.HTTPException:
                     continue
                 self.storage.mark_fired(gid, r["id"], fire.isoformat())
-                if r.get("date"):
+                if r.get("date") and not r.get("repeat_days"):
                     self._update_reminder(gid, str(r["id"]), {"enabled": False})
 
     @scheduler.before_loop
@@ -129,20 +152,7 @@ class Announcements(commands.Cog):
         previous = reminder.copy()
         reminder.update(changes)
 
-        # Storage's persistence method wasn't included with the supplied files.
-        # Support common method names without changing the existing data format.
-        persist = next(
-            (getattr(self.storage, name) for name in ("save", "_save", "save_data", "_save_data")
-             if callable(getattr(self.storage, name, None))),
-            None,
-        )
-        if persist is None:
-            reminder.clear()
-            reminder.update(previous)
-            raise RuntimeError(
-                "Storage has no supported save method (save/_save/save_data/_save_data). "
-                "Check storage.py and update _update_reminder to call its persistence method."
-            )
+        persist = self.storage.save
         try:
             persist()
         except Exception:
@@ -186,7 +196,7 @@ class Announcements(commands.Cog):
         )
         await interaction.response.send_message(f"Posted in {channel.mention}.", ephemeral=True)
 
-    @app_commands.command(name="addreminder", description="Add a daily scheduled announcement (times are UTC)")
+    @app_commands.command(name="addreminder", description="Add an announcement: once or every X days (UTC)")
     @app_commands.describe(
         name="Short name, e.g. Bear Trap",
         time="Event time in UTC, HH:MM — e.g. 19:00",
@@ -195,6 +205,7 @@ class Announcements(commands.Cog):
         emoji="Emoji shown before the title",
         lead_minutes="Post this many minutes BEFORE the event time (default 0)",
         ping="Ping @everyone (default: yes)",
+        repeat="Repeat every X days (0=once, 1=daily, 3=every 3 days)",
     )
     @app_commands.checks.has_permissions(manage_guild=True)
     async def addreminder(
@@ -207,16 +218,33 @@ class Announcements(commands.Cog):
         emoji: str = "📢",
         lead_minutes: int = 0,
         ping: bool = True,
+        repeat: int = 0,
     ):
         try:
             hour, minute = parse_time(time)
-        except ValueError as e:
-            await interaction.response.send_message(f"Bad time: {e}", ephemeral=True)
+        except ValueError as exc:
+            await interaction.response.send_message(f"Bad time: {exc}", ephemeral=True)
             return
-        if lead_minutes < 0 or lead_minutes > 720:
-            await interaction.response.send_message("lead_minutes must be between 0 and 720.", ephemeral=True)
+        if not 0 <= lead_minutes <= 720:
+            await interaction.response.send_message(
+                "lead_minutes must be between 0 and 720.", ephemeral=True
+            )
             return
-        r = self.storage.add_reminder(
+        if not 0 <= repeat <= 3650:
+            await interaction.response.send_message(
+                "repeat must be between 0 (once) and 3650 days.", ephemeral=True
+            )
+            return
+
+        # First occurrence is the next UTC event whose announcement time
+        # (accounting for lead_minutes) has not already passed.
+        now = datetime.now(timezone.utc)
+        first_event = now.replace(hour=hour, minute=minute, second=0, microsecond=0)
+        if first_event - timedelta(minutes=lead_minutes) <= now:
+            first_event += timedelta(days=1)
+        first_day = first_event.date().isoformat()
+
+        reminder = self.storage.add_reminder(
             interaction.guild_id,
             {
                 "name": name,
@@ -228,11 +256,19 @@ class Announcements(commands.Cog):
                 "body": body,
                 "ping": ping,
                 "enabled": True,
+                "date": first_day if repeat == 0 else None,
+                "repeat_days": repeat if repeat > 0 else None,
+                "repeat_start_date": first_day if repeat > 0 else None,
             },
         )
+        schedule = ("once" if repeat == 0 else
+                    "daily" if repeat == 1 else f"every {repeat} days")
         await interaction.response.send_message(
-            f"Reminder added: **{r['name']}** at {hour:02d}:{minute:02d} UTC "
-            f"(lead {lead_minutes} min, id `{r['id']}`)."
+            f"✅ Reminder added: **{reminder['name']}** at "
+            f"**{hour:02d}:{minute:02d} UTC**.\n"
+            f"Schedule: **{schedule}**, first event: **{first_day}** UTC.\n"
+            f"Lead: **{lead_minutes} min** · ID: `{reminder['id']}`",
+            ephemeral=True,
         )
 
     @app_commands.command(name="setdate", description="Set a one-time UTC date for a reminder")
@@ -280,7 +316,9 @@ class Announcements(commands.Cog):
         self._update_reminder(
             interaction.guild_id,
             reminder_id,
-            {"date": event_date.isoformat(), "enabled": True},
+            {"date": event_date.isoformat(), "enabled": True,
+             "repeat_days": None, "repeat_start_date": None,
+             "repeat_last_fire": None},
         )
         await interaction.response.send_message(
             f"📅 **Reminder date updated!**\n"
@@ -289,6 +327,65 @@ class Announcements(commands.Cog):
             f"**Event time:** {reminder['hour']:02d}:{reminder['minute']:02d} UTC\n"
             f"**Announcement time:** <t:{int(fire_time.timestamp())}:F>\n"
             "This reminder will post once and then pause.",
+            ephemeral=True,
+        )
+
+    @app_commands.command(name="repeat", description="Repeat a reminder every X days (UTC)")
+    @app_commands.describe(
+        reminder_id="Reminder ID shown by /reminders",
+        days="Repeat interval in days (1=daily, 2=every 2 days)",
+        start_date="Optional first event date YYYY-MM-DD (UTC); defaults to today",
+    )
+    @app_commands.checks.has_permissions(manage_guild=True)
+    async def repeat(
+        self,
+        interaction: discord.Interaction,
+        reminder_id: str,
+        days: int,
+        start_date: str = None,
+    ):
+        if not 1 <= days <= 3650:
+            await interaction.response.send_message(
+                "Days must be between 1 and 3650.", ephemeral=True
+            )
+            return
+        guild = self.storage.get_guild(interaction.guild_id)
+        reminder_id = reminder_id.strip()
+        reminder = next(
+            (r for r in guild["reminders"] if str(r["id"]) == reminder_id), None
+        )
+        if reminder is None:
+            await interaction.response.send_message(
+                f"No reminder with id `{reminder_id}`.", ephemeral=True
+            )
+            return
+        if start_date:
+            try:
+                anchor_day = datetime.strptime(start_date, "%Y-%m-%d").date()
+            except ValueError:
+                await interaction.response.send_message(
+                    "Use YYYY-MM-DD for start_date.", ephemeral=True
+                )
+                return
+        else:
+            # Preserve the existing event date when converting a one-time reminder.
+            anchor_day = (datetime.strptime(reminder["repeat_start_date"], "%Y-%m-%d").date()
+                          if reminder.get("repeat_start_date") and reminder.get("repeat_days")
+                          else datetime.strptime(reminder["date"], "%Y-%m-%d").date()
+                          if reminder.get("date") else datetime.now(timezone.utc).date())
+
+        self._update_reminder(interaction.guild_id, reminder_id, {
+            "repeat_days": days,
+            "repeat_start_date": anchor_day.isoformat(),
+            "repeat_last_fire": None,
+            "date": None,
+            "enabled": True,
+        })
+        await interaction.response.send_message(
+            f"🔁 **{reminder['name']}** will repeat every **{days}** day(s) "
+            f"starting **{anchor_day.isoformat()}** at "
+            f"**{reminder['hour']:02d}:{reminder['minute']:02d} UTC** "
+            f"(lead {reminder.get('lead_minutes', 0)} min).",
             ephemeral=True,
         )
 
@@ -301,9 +398,12 @@ class Announcements(commands.Cog):
         lines = []
         for r in g["reminders"]:
             state = "on" if r.get("enabled", True) else "off"
+            schedule = (f"every {r['repeat_days']} day(s) from {r['repeat_start_date']}"
+                        if r.get("repeat_days") else
+                        (f"once on {r['date']}" if r.get("date") else "daily"))
             lines.append(
                 f"`{r['id']}` {r.get('emoji', '')} **{r['name']}** — {r['hour']:02d}:{r['minute']:02d} UTC, "
-                f"lead {r['lead_minutes']} min, ping {'yes' if r.get('ping', True) else 'no'}, {state}"
+                f"{schedule}, lead {r['lead_minutes']} min, ping {'yes' if r.get('ping', True) else 'no'}, {state}"
             )
         await interaction.response.send_message("\n".join(lines), ephemeral=True)
 
@@ -444,6 +544,7 @@ class Announcements(commands.Cog):
     @announce.error
     @addreminder.error
     @setdate.error
+    @repeat.error
     @removereminder.error
     @testreminder.error
     @editreminder.error
