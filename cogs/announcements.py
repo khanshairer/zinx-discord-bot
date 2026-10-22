@@ -170,7 +170,7 @@ class Announcements(commands.Cog):
         self.storage.set_channel(interaction.guild_id, channel.id)
         await interaction.response.send_message(
             f"Announcements channel set to {channel.mention}. "
-            "Default reminders added: Daily Reset (00:00 UTC) and Bear Trap (19:00 UTC). "
+            "Default reminder: Daily Reset (00:00 UTC). "
             "Use `/reminders` to see them, `/addreminder` for more."
         )
 
