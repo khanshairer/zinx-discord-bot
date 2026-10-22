@@ -208,6 +208,7 @@ class Announcements(commands.Cog):
         lead_minutes="Post this many minutes BEFORE the event time (default 0)",
         ping="Ping @everyone (default: yes)",
         repeat="Repeat every X days (0=once, 1=daily, 3=every 3 days)",
+        date="Event/start date YYYY-MM-DD UTC (default: today UTC)",
     )
     @app_commands.checks.has_permissions(manage_guild=True)
     async def addreminder(
@@ -221,6 +222,7 @@ class Announcements(commands.Cog):
         lead_minutes: int = 0,
         ping: bool = True,
         repeat: int = 0,
+        date: str = None,
     ):
         try:
             hour, minute = parse_time(time)
@@ -238,13 +240,32 @@ class Announcements(commands.Cog):
             )
             return
 
-        # First occurrence is the next UTC event whose announcement time
-        # (accounting for lead_minutes) has not already passed.
+        # Date is the event date (and repeat anchor), in UTC.
+        # Without a supplied date, use TODAY rather than silently choosing tomorrow.
         now = datetime.now(timezone.utc)
-        first_event = now.replace(hour=hour, minute=minute, second=0, microsecond=0)
-        if first_event - timedelta(minutes=lead_minutes) <= now:
-            first_event += timedelta(days=1)
-        first_day = first_event.date().isoformat()
+        if date is None:
+            event_day = now.date()
+        else:
+            try:
+                event_day = datetime.strptime(date, "%Y-%m-%d").date()
+            except ValueError:
+                await interaction.response.send_message(
+                    "❌ Invalid date. Use YYYY-MM-DD (UTC).", ephemeral=True
+                )
+                return
+
+        event_at = datetime.combine(
+            event_day, datetime.min.time(), tzinfo=timezone.utc
+        ).replace(hour=hour, minute=minute)
+        first_fire = event_at - timedelta(minutes=lead_minutes)
+        if first_fire <= now:
+            await interaction.response.send_message(
+                "❌ The announcement time for that date has already passed (UTC). "
+                "Choose a future date/time, accounting for lead_minutes.",
+                ephemeral=True,
+            )
+            return
+        first_day = event_day.isoformat()
 
         reminder = self.storage.add_reminder(
             interaction.guild_id,
@@ -603,6 +624,31 @@ class Announcements(commands.Cog):
             await interaction.response.send_message(
                 f"No reminder with id `{reminder_id}`.", ephemeral=True
             )
+
+    @app_commands.command(name="help", description="Learn what each zinxAssistant command does")
+    async def help_command(self, interaction: discord.Interaction):
+        embed = discord.Embed(
+            title="💜 zinxAssistant — Command Help",
+            description=(
+                "Schedule Whiteout Survival announcements in **UTC (game time)**.\n"
+                "Run `/setup` first to choose the default channel.\n"
+                "🔒 = Requires **Manage Server** permission."
+            ),
+            color=discord.Color.blurple(),
+        )
+        embed.add_field(name="🔒 /setup channel", value="Choose the default announcement channel; adds Daily Reset on first setup.", inline=False)
+        embed.add_field(name="🔒 /announce title message", value="Send an announcement immediately (with optional emoji and @everyone).", inline=False)
+        embed.add_field(name="🔒 /addreminder", value="Create a reminder with date, UTC time, optional lead minutes, and repeat days. Repeat 0 = once; 1 = daily; 3 = every 3 days.", inline=False)
+        embed.add_field(name="/reminders", value="List reminders, IDs, schedules, status, and their destination channels.", inline=False)
+        embed.add_field(name="🔒 /setdate reminder_id date", value="Set a one-time event date in YYYY-MM-DD UTC.", inline=False)
+        embed.add_field(name="🔒 /repeat reminder_id days", value="Repeat an existing reminder every X days; optional start date.", inline=False)
+        embed.add_field(name="🔒 /setchannel reminder_id channel", value="Set a custom channel for one reminder; omit channel to restore `/setup` default.", inline=False)
+        embed.add_field(name="🔒 /editreminder reminder_id", value="Update an existing reminder's name, time, title, text, emoji, lead time, or ping.", inline=False)
+        embed.add_field(name="🔒 /testreminder reminder_id", value="Send a test immediately to that reminder's chosen channel.", inline=False)
+        embed.add_field(name="🔒 /pausereminder /resumereminder", value="Temporarily stop or resume a reminder by ID.", inline=False)
+        embed.add_field(name="🔒 /removereminder /deletereminder", value="Permanently delete a reminder by ID (both commands do the same thing).", inline=False)
+        embed.set_footer(text="All dates and times use UTC • /help is available to everyone")
+        await interaction.response.send_message(embed=embed, ephemeral=True)
 
     # ---------- error handling ----------
 
