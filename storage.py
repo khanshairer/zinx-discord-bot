@@ -26,17 +26,6 @@ DEFAULT_REMINDERS = [
         "ping": True,
         "enabled": True,
     },
-    {
-        "name": "Bear Trap",
-        "emoji": "🐻",
-        "hour": 19,
-        "minute": 0,
-        "lead_minutes": 0,
-        "title": "{time} Bear Trap",
-        "body": "The {time} Bear Trap opens in {lead} minutes. Get your buffs on and prepare your marches for the hunt!",
-        "ping": True,
-        "enabled": True,
-    },
 ]
 
 
