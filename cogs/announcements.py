@@ -65,14 +65,16 @@ class Announcements(commands.Cog):
     async def scheduler(self):
         now = datetime.now(timezone.utc)
         for gid, g in list(self.storage.data["guilds"].items()):
-            channel_id = g.get("channel_id")
-            if not channel_id:
-                continue
-            channel = self.bot.get_channel(channel_id)
-            if channel is None:
-                continue
             for r in g["reminders"]:
                 if not r.get("enabled", True):
+                    continue
+                # Per-reminder channel overrides the channel chosen by /setup.
+                # Reminders without an override still use the default channel.
+                channel_id = r.get("channel_id") or g.get("channel_id")
+                if not channel_id:
+                    continue
+                channel = self.bot.get_channel(int(channel_id))
+                if channel is None:
                     continue
                 if r.get("repeat_days"):
                     fire = repeated_fire_time(r, now)
@@ -389,6 +391,64 @@ class Announcements(commands.Cog):
             ephemeral=True,
         )
 
+    @app_commands.command(name="setchannel", description="Set a channel for one reminder, or reset it to /setup default")
+    @app_commands.describe(
+        reminder_id="ID shown by /reminders",
+        channel="Where to post this reminder (omit to use /setup channel)",
+    )
+    @app_commands.checks.has_permissions(manage_guild=True)
+    async def setchannel(
+        self,
+        interaction: discord.Interaction,
+        reminder_id: str,
+        channel: discord.TextChannel = None,
+    ):
+        reminder_id = reminder_id.strip()
+        guild = self.storage.get_guild(interaction.guild_id)
+        reminder = next(
+            (r for r in guild["reminders"] if str(r["id"]) == reminder_id), None
+        )
+        if reminder is None:
+            await interaction.response.send_message(
+                f"No reminder with id `{reminder_id}`.", ephemeral=True
+            )
+            return
+
+        if channel is not None:
+            me = interaction.guild.me
+            permissions = channel.permissions_for(me)
+            if not (permissions.view_channel and permissions.send_messages
+                    and permissions.embed_links):
+                await interaction.response.send_message(
+                    "I need View Channel, Send Messages and Embed Links permissions "
+                    f"in {channel.mention}.", ephemeral=True
+                )
+                return
+            if reminder.get("ping", True) and not permissions.mention_everyone:
+                await interaction.response.send_message(
+                    f"I also need Mention Everyone permission in {channel.mention} "
+                    "for this reminder's @everyone ping.", ephemeral=True
+                )
+                return
+
+        if channel is None and not guild.get("channel_id"):
+            await interaction.response.send_message(
+                "No default channel set. Run `/setup` first.", ephemeral=True
+            )
+            return
+
+        # None removes the custom override; the scheduler uses /setup's channel.
+        self._update_reminder(
+            interaction.guild_id, reminder_id,
+            {"channel_id": channel.id if channel is not None else None},
+        )
+        target = channel.mention if channel is not None else f"<#{guild['channel_id']}>"
+        await interaction.response.send_message(
+            f"✅ **{reminder['name']}** (`{reminder_id}`) will post in {target}."
+            + (" (Default channel)" if channel is None else ""),
+            ephemeral=True,
+        )
+
     @app_commands.command(name="reminders", description="List this server's scheduled announcements")
     async def reminders(self, interaction: discord.Interaction):
         g = self.storage.get_guild(interaction.guild_id)
@@ -403,7 +463,9 @@ class Announcements(commands.Cog):
                         (f"once on {r['date']}" if r.get("date") else "daily"))
             lines.append(
                 f"`{r['id']}` {r.get('emoji', '')} **{r['name']}** — {r['hour']:02d}:{r['minute']:02d} UTC, "
-                f"{schedule}, lead {r['lead_minutes']} min, ping {'yes' if r.get('ping', True) else 'no'}, {state}"
+                f"{schedule}, lead {r['lead_minutes']} min, ping {'yes' if r.get('ping', True) else 'no'}, "
+                f"channel <#{r.get('channel_id') or g.get('channel_id')}>"
+                f"{' (custom)' if r.get('channel_id') else ' (default)'}, {state}"
             )
         await interaction.response.send_message("\n".join(lines), ephemeral=True)
 
@@ -420,13 +482,17 @@ class Announcements(commands.Cog):
     @app_commands.describe(reminder_id="The id shown by /reminders")
     @app_commands.checks.has_permissions(manage_guild=True)
     async def testreminder(self, interaction: discord.Interaction, reminder_id: str):
-        channel = await self._require_channel(interaction)
-        if channel is None:
-            return
         g = self.storage.get_guild(interaction.guild_id)
         match = next((r for r in g["reminders"] if r["id"] == reminder_id.strip()), None)
         if match is None:
             await interaction.response.send_message(f"No reminder with id `{reminder_id}`.", ephemeral=True)
+            return
+        channel_id = match.get("channel_id") or g.get("channel_id")
+        channel = self.bot.get_channel(int(channel_id)) if channel_id else None
+        if channel is None:
+            await interaction.response.send_message(
+                "Reminder channel unavailable. Run `/setup` or `/setchannel`.", ephemeral=True
+            )
             return
         await self.post_reminder(channel, match)
         await interaction.response.send_message(f"Test posted in {channel.mention}.", ephemeral=True)
@@ -544,6 +610,7 @@ class Announcements(commands.Cog):
     @announce.error
     @addreminder.error
     @setdate.error
+    @setchannel.error
     @repeat.error
     @removereminder.error
     @testreminder.error
