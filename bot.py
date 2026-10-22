@@ -1,4 +1,3 @@
-
 """zinxAssistant — Discord announcements and welcome bot."""
 
 import logging
@@ -46,6 +45,39 @@ class ZinxAssistant(commands.Bot):
             len(self.guilds),
         )
 
+    async def on_guild_join(self, guild: discord.Guild):
+        """Explain setup after zinxAssistant is invited into a new server."""
+        embed = discord.Embed(
+            title="💜 zinxAssistant is here!",
+            description=(
+                "Thanks for adding me! I post scheduled alliance announcements "
+                "and reminders in **UTC (game time)**.\n\n"
+                "🔧 An admin can run `/setup` to choose the default "
+                "announcement channel.\n"
+                "📖 **Use `/help` for more**, including all available commands."
+            ),
+            color=discord.Color.from_rgb(153, 102, 255),
+        )
+        embed.set_footer(text="💜 zinxAssistant • Your server companion")
+        # Prefer the system channel; otherwise use the first writable text channel.
+        candidates = ([guild.system_channel] if guild.system_channel else []) + list(guild.text_channels)
+        for channel in candidates:
+            if channel is None:
+                continue
+            me = guild.me
+            if me is None:
+                continue
+            perms = channel.permissions_for(me)
+            if not (perms.view_channel and perms.send_messages and perms.embed_links):
+                continue
+            try:
+                await channel.send(embed=embed)
+                logger.info("Joined guild=%s; sent intro to channel=%s", guild.id, channel.id)
+                return
+            except discord.HTTPException:
+                logger.exception("Could not send intro in channel=%s", channel.id)
+        logger.warning("No writable introduction channel in guild=%s", guild.id)
+
     async def on_member_join(self, member: discord.Member):
         guild = member.guild
 
@@ -79,7 +111,8 @@ class ZinxAssistant(commands.Bot):
                 "🌟 We're excited to have you here!\n"
                 "📜 Please read the server rules.\n"
                 "💬 Introduce yourself and make friends.\n"
-                "🎮 Enjoy your stay!\n\n"
+                "🎮 Enjoy your stay!\n"
+                "📖 Type `/help` for more information about zinxAssistant!\n\n"
                 f"🎉 Member #{guild.member_count}"
             ),
             color=discord.Color.from_rgb(153, 102, 255),
